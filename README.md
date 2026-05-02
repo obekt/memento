@@ -43,13 +43,22 @@ Memento stores knowledge as **markdown files** that survive across sessions. Whe
 
 ## Quick Start (30 seconds)
 
+Install from the repo (not yet on PyPI):
+
 ```bash
-# Install globally so your IDE can find it
-pipx install memento-mcp
-# or: uv tool install memento-mcp
+# With pipx
+pipx install git+https://github.com/obekt/memento.git
+
+# With uv (recommended)
+uv tool install git+https://github.com/obekt/memento.git
+
+# Or clone and install locally
+git clone https://github.com/obekt/memento.git
+cd memento
+uv pip install -e .
 ```
 
-Add to your MCP client:
+Add to your MCP client (use `"command": "memento"` if you installed globally; use the **full path** if running from a local clone):
 
 **Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
 ```json
@@ -85,6 +94,15 @@ Add to your MCP client:
     }
   }
 }
+```
+
+**OpenCode** (`~/.config/opencode/opencode.json`):
+```bash
+opencode mcp add
+# → Select "Global"
+# → Name: memento
+# → Transport: Local
+# → Command: memento   (or full path if not globally installed)
 ```
 
 Restart your IDE. Tell your agent: *"Wake up and check your tattoos."* It will.
