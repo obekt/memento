@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "memento": {
+      "command": "/Users/obekt/proj/memento/.venv/bin/python",
+      "args": ["-m", "memento.server"]
+    }
+  }
+}
