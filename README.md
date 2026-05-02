@@ -27,15 +27,17 @@ You pay $20/month for an AI that writes code. Then you open a new chat, and:
 
 ## The Solution
 
-Memento stores knowledge as **markdown files** that survive across sessions. When connected to your MCP-aware IDE (Cursor, Claude Desktop, Windsurf, VS Code), your agent can:
+Memento stores knowledge as **markdown files** that survive across sessions. When connected to your MCP-aware IDE, your agent gets 20+ tools it can call naturally:
 
-- 🔥 **`tattoo()`** — Burn permanent facts into its skin (architecture, APIs, contracts)
-- 📸 **`snap()`** — Take Polaroids of errors with captions (error + fix)
-- 📝 **`scribble()`** — Jot temporary notes (TODOs, hypotheses)
-- 🧠 **`wake_up()`** — Reconstruct context at the start of every session
-- 🔍 **`sammy_jankis_test()`** — Detect repeated mistakes before you make them again
+- 🔥 **Tattoo** — Burn permanent facts into its skin (architecture, APIs, contracts)
+- 📸 **Snap** — Take Polaroids of errors with captions (error + fix)
+- 📝 **Scribble** — Jot temporary notes (TODOs, hypotheses)
+- 🧠 **Wake up** — Reconstruct context at the start of every session
+- 🔍 **Sammy Jankis test** — Detect repeated mistakes before you make them again
 
-**No API keys. No ports. No cloud. No setup.** The agent reads the tool names and knows what to do.
+**No API keys. No ports. No cloud. No setup.** You just talk to your agent. It picks the right tool.
+
+> MCP clients may prefix tools with the server name (e.g., `memento_tattoo` in OpenCode). You don't type these — the agent does.
 
 ---
 
@@ -169,62 +171,43 @@ Example: `chest/memento/architecture` vs `left_arm/client-x/architecture` — un
 
 ### Start every session with context
 
-```
-Agent: wake_up(context="left_arm")
-Memento: {
-  "tattoos": [
-    { "title": "Auth Flow", "preview": "JWT in httpOnly cookie, refresh token rotated..." },
-    { "title": "DB Schema", "preview": "Users table has soft-delete via deleted_at..." }
-  ],
-  "polaroids": [
-    { "title": "Redis Down", "preview": "Connection refused port 6379. Fix: docker-compose up redis" }
-  ],
-  "notes": [
-    { "title": "TODO", "preview": "Refactor auth middleware before shipping v2" }
-  ]
-}
-```
+**You say:** *"Wake up. What do you remember?"*
+
+**The agent calls** `memento_wake_up()` **and tells you:**
+
+> "You have 2 tattoos on your chest: an Auth Flow (JWT in httpOnly cookies) and a DB Schema (soft-delete via `deleted_at`). You also have a polaroid about Redis being down on port 6379, and a note reminding you to refactor auth middleware before v2."
 
 ### When you make a decision that matters
 
-```
-Agent: tattoo(
-  context="chest",
-  topic="memento/architecture",
-  content="Use SQLite with FTS5 for search. Markdown files are source of truth. Index is disposable.",
-  title="Storage Design"
-)
-Memento: Tattooed on chest: 'Storage Design' (ID: ..., permanent)
-```
+**You say:** *"Tattoo this on my chest: We use SQLite with FTS5 for search. Markdown files are source of truth. Topic: architecture/storage."*
+
+**The agent calls** `memento_tattoo(...)` **and confirms:**
+
+> "Done. Burned into your chest: SQLite + FTS5 for search, Markdown as source of truth."
+
+A `.md` file is written to `~/.memento/wiki/chest/architecture/storage/`. It's permanent. The agent will find it in every future session.
 
 ### When you hit an error you'll hit again
 
-```
-Agent: snap(
-  context="left_arm",
-  topic="bugs/redis",
-  content="ConnectionRefusedError: port 6379",
-  caption="Redis is down. Run: docker-compose up redis",
-  title="Redis Down"
-)
-```
+**You say:** *"Snap a polaroid of this error: 'ConnectionRefusedError port 6379'. Caption: 'Redis is down. Run docker-compose up redis.' Topic: bugs/redis."*
+
+**The agent calls** `memento_snap(...)` **and stores it.** Next time you see that error, a Sammy Jankis test will find this polaroid.
 
 ### When you might be repeating yourself
 
-```
-Agent: sammy_jankis_test("Connection refused on port 6379")
-Memento: [
-  { "memory": { "title": "Redis Down", "preview": "Connection refused port 6379..." },
-    "warning": "Repeated pattern detected",
-    "reliability": 1.0 }
-]
-```
+**You say:** *"Run a Sammy Jankis test for 'database choice'."*
+
+**The agent calls** `memento_sammy_jankis_test(query="database choice")` **and reports:**
+
+> "No matching memories. This is a fresh decision — no past mistakes to watch out for yet."
 
 Named after Sammy Jankis — the man who accidentally killed his wife by giving her too much insulin because he couldn't remember he'd already given her a shot. **Don't be Sammy.**
 
 ---
 
 ## Complete Tool Reference
+
+Your agent sees these tools (MCP clients may prefix them, e.g. `memento_tattoo`):
 
 | Tool | Purpose |
 |------|---------|
@@ -272,11 +255,8 @@ Named after Sammy Jankis — the man who accidentally killed his wife by giving 
 # Quick backup — just copy the wiki directory
 cp -r ~/.memento/wiki ~/memento-backup-$(date +%Y%m%d)
 
-# Or export via tool
-export_vault(path="~/backup.zip")
-
-# Import on another machine
-import_vault(path="~/backup.zip", merge_strategy="keep_both")
+# Or ask your agent: "Export my memento vault to ~/backup.zip"
+# Or: "Import ~/backup.zip into my memento vault"
 ```
 
 ---
