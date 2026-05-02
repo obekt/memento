@@ -10,6 +10,8 @@
 
 **A zero-config, self-documenting local MCP server that gives your coding agent persistent memory.**
 
+Think of it as an **LLM wiki** — a knowledge base your AI coding agent can read from and write to across sessions. It's a local **MCP memory server** that turns your agent's scattered thoughts into a structured, searchable, permanent archive.
+
 Inspired by Christopher Nolan's *Memento* (2000).
 
 ---
@@ -25,6 +27,8 @@ You pay $20/month for an AI that writes code. Then you open a new chat, and:
 
 **Your agent has anterograde amnesia.** Every session is a blank slate.
 
+Memento fixes this by giving your agent **persistent memory** — an local LLM wiki that survives across conversations.
+
 ## The Solution
 
 Memento stores knowledge as **markdown files** that survive across sessions. When connected to your MCP-aware IDE, your agent gets 20+ tools it can call naturally:
@@ -38,6 +42,17 @@ Memento stores knowledge as **markdown files** that survive across sessions. Whe
 **No API keys. No ports. No cloud. No setup.** You just talk to your agent. It picks the right tool.
 
 > MCP clients may prefix tools with the server name (e.g., `memento_tattoo` in OpenCode). You don't type these — the agent does.
+
+### What makes this an LLM wiki?
+
+Unlike generic memory servers that store blobs of text, Memento organizes knowledge like a wiki:
+- **Namespaced topics** (`chest/architecture` vs `left_arm/bugs`)
+- **Wiki-links** (`[[slug]]`) connect related memories into a graph
+- **Full-text search** (FTS5) finds relevant entries in milliseconds
+- **Git-friendly** markdown files you can diff, merge, and version control
+- **Backlinks** show which memories reference each other
+
+Your agent isn't just remembering — it's navigating a structured knowledge base.
 
 ---
 
@@ -58,7 +73,9 @@ cd memento
 uv pip install -e .
 ```
 
-Add to your MCP client (use `"command": "memento"` if you installed globally; use the **full path** if running from a local clone):
+### Global install (recommended)
+
+If you installed via `uv tool install` or `pipx install`, use `"command": "memento"`:
 
 **Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
 ```json
@@ -102,7 +119,21 @@ opencode mcp add
 # → Select "Global"
 # → Name: memento
 # → Transport: Local
-# → Command: memento   (or full path if not globally installed)
+# → Command: memento
+```
+
+### Local clone / development
+
+If you're running from a local clone, use the full path to your venv:
+
+```json
+{
+  "mcpServers": {
+    "memento": {
+      "command": "/Users/obekt/proj/memento/.venv/bin/memento"
+    }
+  }
+}
 ```
 
 Restart your IDE. Tell your agent: *"Wake up and check your tattoos."* It will.
@@ -128,6 +159,8 @@ Restart your IDE. Tell your agent: *"Wake up and check your tattoos."* It will.
 ```
 
 Every memory is a **human-readable `.md` file** with YAML frontmatter. The SQLite database is just a search index — if it breaks, delete it and it regenerates. Your data is safe in the files.
+
+This architecture makes Memento the ideal **local knowledge base for AI coding agents**: no cloud dependency, no vendor lock-in, and your memories are readable with `cat`.
 
 ```markdown
 ---

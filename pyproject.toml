@@ -8,7 +8,7 @@ requires-python = ">=3.10"
 authors = [
     {name = "Memento Contributors"},
 ]
-keywords = ["mcp", "llm", "memory", "wiki", "knowledge-base", "sqlite", "fts5"]
+keywords = ["mcp", "llm", "memory", "wiki", "knowledge-base", "sqlite", "fts5", "llm-wiki", "ai-agent-memory", "persistent-memory", "coding-agent", "mcp-memory-server"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
