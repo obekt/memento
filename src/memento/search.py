@@ -6,10 +6,6 @@ from memento import wiki
 from memento import index
 
 
-def _ensure_index() -> None:
-    index.init_index()
-
-
 def search_memories(
     query: str,
     kind: str | None = None,
@@ -49,60 +45,22 @@ def resolve_link(link_target: str) -> wiki.Memory | None:
     return mem
 
 
-def wake_up(context: str | None = None, limit: int = 10) -> dict[str, Any]:
-    """Reconstruct context: read recent tattoos, polaroids, and notes."""
-    tattoos: list[wiki.Memory] = []
-    polaroids: list[wiki.Memory] = []
-    notes: list[wiki.Memory] = []
-
-    for e in index.get_tattoos(context, limit):
+def _hydrate_entries(entries: list[wiki.Memory]) -> list[wiki.Memory]:
+    """Read full memory from file and attach tags for a list of index entries."""
+    result = []
+    for e in entries:
         if e.path and e.path.exists():
             mem = wiki.read_memory(e.path)
             mem.tags = index.get_tags_for_entry(mem.id)
-            tattoos.append(mem)
+            result.append(mem)
+    return result
 
-    # Polaroids
-    from memento.index import _connect, init_index
-    init_index()
-    with _connect() as conn:
-        sql = "SELECT * FROM index_entries WHERE kind = 'polaroid'"
-        params: list[Any] = []
-        if context:
-            sql += " AND context = ?"
-            params.append(context)
-        sql += " ORDER BY updated_at DESC LIMIT ?"
-        params.append(limit)
-        for r in conn.execute(sql, params):
-            p = wiki.Memory(
-                id=r["id"], kind=r["kind"], context=r["context"], topic=r["topic"],
-                slug=r["slug"], title=r["title"] or "", content=r["content"],
-                caption=r["caption"] or "", path=wiki.Path(r["path"]) if r["path"] else None,
-                created_at=r["created_at"] or "", updated_at=r["updated_at"] or "",
-            )
-            if p.path and p.path.exists():
-                mem = wiki.read_memory(p.path)
-                mem.tags = index.get_tags_for_entry(mem.id)
-                polaroids.append(mem)
 
-        # Notes
-        sql = "SELECT * FROM index_entries WHERE kind = 'note'"
-        params = []
-        if context:
-            sql += " AND context = ?"
-            params.append(context)
-        sql += " ORDER BY updated_at DESC LIMIT ?"
-        params.append(limit)
-        for r in conn.execute(sql, params):
-            p = wiki.Memory(
-                id=r["id"], kind=r["kind"], context=r["context"], topic=r["topic"],
-                slug=r["slug"], title=r["title"] or "", content=r["content"],
-                caption=r["caption"] or "", path=wiki.Path(r["path"]) if r["path"] else None,
-                created_at=r["created_at"] or "", updated_at=r["updated_at"] or "",
-            )
-            if p.path and p.path.exists():
-                mem = wiki.read_memory(p.path)
-                mem.tags = index.get_tags_for_entry(mem.id)
-                notes.append(mem)
+def wake_up(context: str | None = None, limit: int = 10) -> dict[str, Any]:
+    """Reconstruct context: read recent tattoos, polaroids, and notes."""
+    tattoos = _hydrate_entries(index.get_entries_by_kind("tattoo", context, limit))
+    polaroids = _hydrate_entries(index.get_entries_by_kind("polaroid", context, limit))
+    notes = _hydrate_entries(index.get_entries_by_kind("note", context, limit))
 
     return {
         "context": context or "all",
@@ -118,39 +76,46 @@ def wake_up(context: str | None = None, limit: int = 10) -> dict[str, Any]:
 
 
 def reverse_timeline(context: str | None = None, limit: int = 20) -> list[wiki.Memory]:
-    """View memories in reverse chronological order (oldest first)."""
-    _ensure_index()
-    from memento.index import _connect
-    with _connect() as conn:
-        sql = "SELECT * FROM index_entries WHERE 1=1"
-        params: list[Any] = []
-        if context:
-            sql += " AND context = ?"
-            params.append(context)
-        sql += " ORDER BY created_at ASC LIMIT ?"
-        params.append(limit)
-        rows = conn.execute(sql, params).fetchall()
-        result = []
-        for r in rows:
-            p = wiki.Path(r["path"]) if r["path"] else None
-            if p and p.exists():
-                mem = wiki.read_memory(p)
-                mem.tags = index.get_tags_for_entry(mem.id)
-                result.append(mem)
-        return result
+    """View memories in reverse chronological order (newest first, like the movie)."""
+    entries = index.get_recent_entries(context, limit)
+    return _hydrate_entries(entries)
 
 
 def sammy_jankis_test(query: str, limit: int = 5) -> list[dict[str, Any]]:
-    """Search for similar past errors or low-certainty memories."""
-    entries = index.search(query, limit=limit)
+    """Search for similar past errors or low-certainty memories.
+
+    Looks for:
+    1. FTS matches for the query (potential repeated patterns)
+    2. Flags low-certainty memories as unreliable
+    3. Detects repeated patterns when multiple memories share the same topic
+    """
+    # Search for matches, cast a wider net then trim
+    entries = index.search(query, limit=limit * 2)
     result = []
+    topic_counts: dict[str, int] = {}
+
     for e in entries:
         if e.path and e.path.exists():
             mem = wiki.read_memory(e.path)
             mem.tags = index.get_tags_for_entry(mem.id)
+            topic_key = f"{mem.context}/{mem.topic}"
+            topic_counts[topic_key] = topic_counts.get(topic_key, 0) + 1
+
+            # Build warning message based on actual signals
+            warnings = []
+            if mem.certainty < 0.8:
+                warnings.append(f"Low certainty ({mem.certainty})")
+            if topic_counts[topic_key] > 1:
+                warnings.append(f"Repeated topic ({topic_key} appeared {topic_counts[topic_key]} times)")
+            if mem.kind == "note":
+                warnings.append("Temporary note — may be outdated")
+
             result.append({
                 "memory": mem,
-                "warning": "Repeated pattern detected" if mem.kind == "note" else None,
+                "warning": "; ".join(warnings) if warnings else None,
                 "reliability": mem.certainty,
             })
-    return result
+
+    # Sort by reliability ascending (least reliable first) and trim to limit
+    result.sort(key=lambda r: r["reliability"])
+    return result[:limit]

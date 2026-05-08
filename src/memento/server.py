@@ -593,17 +593,20 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
         return [TextContent(type="text", text="\n".join(lines))]
 
     if name == "update_memory":
-        mem = memory.update(
-            memory_id=arguments["memory_id"],
-            context=arguments.get("context"),
-            topic=arguments.get("topic"),
-            title=arguments.get("title"),
-            content=arguments.get("content"),
-            caption=arguments.get("caption"),
-            certainty=arguments.get("certainty"),
-            source=arguments.get("source"),
-            tags=arguments.get("tags"),
-        )
+        try:
+            mem = memory.update(
+                memory_id=arguments["memory_id"],
+                context=arguments.get("context"),
+                topic=arguments.get("topic"),
+                title=arguments.get("title"),
+                content=arguments.get("content"),
+                caption=arguments.get("caption"),
+                certainty=arguments.get("certainty"),
+                source=arguments.get("source"),
+                tags=arguments.get("tags"),
+            )
+        except ValueError as e:
+            return [TextContent(type="text", text=str(e))]
         if mem is None:
             return [TextContent(type="text", text=f"No memory found with ID {arguments['memory_id']}")]
         return [TextContent(type="text", text=f"Updated {mem.kind} {mem.id} in {mem.context}/{mem.topic}")]

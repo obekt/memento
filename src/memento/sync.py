@@ -83,7 +83,7 @@ def import_vault(path: str, merge_strategy: str = "keep_both") -> dict[str, Any]
 
             existing_fm = _read_frontmatter(dest)
             imported_text = data.decode("utf-8")
-            imported_fm = _read_frontmatter(dest.__class__("/dev/null"))
+            imported_fm: dict[str, Any] | None = {}
             try:
                 if imported_text.startswith("---"):
                     _, rest = imported_text.split("---", 1)
@@ -226,6 +226,12 @@ def merge_vaults(path_a: str, path_b: str, output_path: str, merge_strategy: str
     # Cleanup temp dirs
     shutil.rmtree(dir_a, ignore_errors=True)
     shutil.rmtree(dir_b, ignore_errors=True)
+    # Clean up merged markdown files left in out_dir (only keep the zip)
+    for item in out_dir.iterdir():
+        if item.is_dir() and item != dir_a and item != dir_b:
+            shutil.rmtree(item, ignore_errors=True)
+        elif item.is_file() and item.suffix == ".md":
+            item.unlink(missing_ok=True)
 
     return {
         "output_path": str(zip_out),

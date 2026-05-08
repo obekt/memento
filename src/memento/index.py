@@ -31,6 +31,9 @@ def init_index() -> None:
                 title TEXT,
                 content TEXT NOT NULL,
                 caption TEXT,
+                certainty REAL DEFAULT 1.0,
+                source TEXT DEFAULT '',
+                image_path TEXT DEFAULT '',
                 path TEXT NOT NULL,
                 created_at TEXT,
                 updated_at TEXT
@@ -98,7 +101,9 @@ def _row_to_memory(row: sqlite3.Row) -> Memory:
         title=row["title"] or "",
         content=row["content"],
         caption=row["caption"] or "",
-        certainty=1.0,
+        certainty=row["certainty"] if row["certainty"] is not None else 1.0,
+        source=row["source"] or "",
+        image_path=row["image_path"] or "",
         created_at=row["created_at"] or "",
         updated_at=row["updated_at"] or "",
         path=Path(row["path"]) if row["path"] else None,
@@ -135,12 +140,15 @@ def index_memory(memory: Memory, path: Path) -> None:
     """Add or update a single memory in the index."""
     init_index()
     with _connect() as conn:
-        # Get old rowid for FTS delete if updating
-        old = conn.execute("SELECT rowid FROM index_entries WHERE id = ?", (memory.id,)).fetchone()
+        # Get old rowid + content for FTS delete if updating
+        old = conn.execute(
+            "SELECT rowid, title, content, caption FROM index_entries WHERE id = ?",
+            (memory.id,),
+        ).fetchone()
         if old:
             conn.execute(
                 "INSERT INTO fts_entries(fts_entries, rowid, title, content, caption) VALUES ('delete', ?, ?, ?, ?)",
-                (old["rowid"], memory.title, memory.content, memory.caption),
+                (old["rowid"], old["title"], old["content"], old["caption"]),
             )
 
         conn.execute("DELETE FROM index_entries WHERE id = ?", (memory.id,))
@@ -149,12 +157,14 @@ def index_memory(memory: Memory, path: Path) -> None:
 
         cur = conn.execute(
             """
-            INSERT INTO index_entries (id, kind, context, topic, slug, title, content, caption, path, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO index_entries (id, kind, context, topic, slug, title, content, caption,
+                                      certainty, source, image_path, path, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 memory.id, memory.kind, memory.context, memory.topic, memory.slug,
-                memory.title, memory.content, memory.caption, str(path),
+                memory.title, memory.content, memory.caption,
+                memory.certainty, memory.source, memory.image_path, str(path),
                 memory.created_at, memory.updated_at,
             ),
         )
@@ -197,12 +207,15 @@ def rebuild_index() -> dict[str, Any]:
         for memory in memories:
             cur = conn.execute(
                 """
-                INSERT INTO index_entries (id, kind, context, topic, slug, title, content, caption, path, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO index_entries (id, kind, context, topic, slug, title, content, caption,
+                                          certainty, source, image_path, path, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     memory.id, memory.kind, memory.context, memory.topic, memory.slug,
-                    memory.title, memory.content, memory.caption, str(memory.path) if memory.path else "",
+                    memory.title, memory.content, memory.caption,
+                    memory.certainty, memory.source, memory.image_path,
+                    str(memory.path) if memory.path else "",
                     memory.created_at, memory.updated_at,
                 ),
             )
@@ -296,6 +309,7 @@ def get_linked_entries(memory_id: str) -> list[dict[str, Any]]:
         return [
             {
                 "link_text": r["link_text"],
+                "resolved": r["id"] is not None,
                 "memory_id": r["id"],
                 "context": r["context"],
                 "topic": r["topic"],
@@ -488,3 +502,45 @@ def summarize(context: str, topic: str) -> dict[str, Any]:
             "by_kind": {r["kind"]: r["c"] for r in kind_rows},
             "tags": [r["name"] for r in tag_rows],
         }
+
+
+def get_entries_by_kind(kind: str, context: str | None = None, limit: int = 50) -> list[Memory]:
+    """Return entries of a specific kind, optionally filtered by context."""
+    init_index()
+    with _connect() as conn:
+        sql = "SELECT * FROM index_entries WHERE kind = ?"
+        params: list[Any] = [kind]
+        if context:
+            sql += " AND context = ?"
+            params.append(context)
+        sql += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(sql, params).fetchall()
+        return [_row_to_memory(r) for r in rows]
+
+
+def get_recent_entries(context: str | None = None, limit: int = 20) -> list[Memory]:
+    """Return entries in reverse chronological order (newest first)."""
+    init_index()
+    with _connect() as conn:
+        sql = "SELECT * FROM index_entries WHERE 1=1"
+        params: list[Any] = []
+        if context:
+            sql += " AND context = ?"
+            params.append(context)
+        sql += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(sql, params).fetchall()
+        return [_row_to_memory(r) for r in rows]
+
+
+def find_memory_path(memory_id: str) -> str | None:
+    """Look up a memory's file path by ID using the index (O(1) instead of O(n) scan)."""
+    init_index()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT path FROM index_entries WHERE id = ?", (memory_id,)
+        ).fetchone()
+        if row and row["path"]:
+            return row["path"]
+    return None

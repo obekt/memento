@@ -168,6 +168,11 @@ def ensure_wiki() -> None:
     WIKI_ROOT.mkdir(parents=True, exist_ok=True)
 
 
+def _clamp_certainty(value: float) -> float:
+    """Clamp certainty to [0.0, 1.0]."""
+    return max(0.0, min(1.0, float(value)))
+
+
 def write_memory(
     kind: str,
     context: str,
@@ -191,6 +196,7 @@ def write_memory(
     updated = updated_at or now
     s = slug or _slugify(title or content[:40])
     tags = list(set((tags or []) + parse_inline_tags(content)))
+    certainty = _clamp_certainty(certainty)
 
     path = _memory_path(context, topic, s)
     # Handle duplicate slugs
@@ -227,7 +233,20 @@ def read_memory(path: Path) -> Memory:
 
 
 def find_memory(memory_id: str) -> Path | None:
-    """Find a memory's file path by its UUID."""
+    """Find a memory's file path by its UUID.
+
+    Tries the index first (O(1)), falls back to full wiki scan if the index
+    is empty or the entry is missing from the index.
+    """
+    # Fast path: ask the index
+    from memento import index
+    indexed_path = index.find_memory_path(memory_id)
+    if indexed_path:
+        p = Path(indexed_path)
+        if p.exists():
+            return p
+
+    # Slow fallback: full scan (needed when index is empty or stale)
     for path in WIKI_ROOT.rglob("*.md"):
         try:
             mem = _read_md(path)
@@ -250,13 +269,26 @@ def update_memory(
     source: str | None = None,
     tags: list[str] | None = None,
 ) -> Memory | None:
-    """Update an existing memory and rewrite its markdown file."""
+    """Update an existing memory and rewrite its markdown file.
+
+    Tattoos are permanent: their content, context, and topic cannot be changed.
+    Only title, tags, caption, source, and certainty can be updated on tattoos.
+    """
     path = find_memory(memory_id)
     if path is None:
         return None
 
     mem = _read_md(path)
     now = _now()
+
+    # Tattoo immutability guard: content, context, and topic cannot change
+    if mem.kind == "tattoo":
+        if content is not None and content != mem.content:
+            raise ValueError("Tattoos are permanent — content cannot be changed.")
+        if context is not None and context != mem.context:
+            raise ValueError("Tattoos are permanent — context cannot be changed.")
+        if topic is not None and topic != mem.topic:
+            raise ValueError("Tattoos are permanent — topic cannot be changed.")
 
     if context is not None:
         mem.context = context
@@ -272,7 +304,7 @@ def update_memory(
     if caption is not None:
         mem.caption = caption
     if certainty is not None:
-        mem.certainty = certainty
+        mem.certainty = _clamp_certainty(certainty)
     if image_path is not None:
         mem.image_path = image_path
     if source is not None:
@@ -295,6 +327,7 @@ def update_memory(
             _write_md(new_path, mem)
             return mem
 
+    mem.path = path
     _write_md(path, mem)
     return mem
 

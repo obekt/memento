@@ -37,8 +37,9 @@ class TestReverseTimeline:
         m1 = memory.store("note", "hand", "todo", "First")
         m2 = memory.store("note", "hand", "todo", "Second")
         results = search.reverse_timeline(limit=2)
-        assert results[0].id == m1.id
-        assert results[1].id == m2.id
+        # Reverse chronological: newest first
+        assert results[0].id == m2.id
+        assert results[1].id == m1.id
 
 
 class TestSammyJankisTest:

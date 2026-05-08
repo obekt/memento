@@ -106,6 +106,7 @@ class TestUpdate:
         mem = wiki.write_memory("note", "hand", "todo", "Old")
         updated = wiki.update_memory(mem.id, content="New")
         assert updated.content == "New"
+        assert updated.path is not None
         read = wiki.read_memory(updated.path)
         assert read.content == "New"
 
@@ -116,6 +117,52 @@ class TestUpdate:
         assert not old_path.exists()
         assert updated.path.exists()
         assert "newtopic" in str(updated.path)
+
+    def test_update_sets_path_even_without_move(self):
+        mem = wiki.write_memory("note", "hand", "todo", "Content")
+        updated = wiki.update_memory(mem.id, title="New Title")
+        assert updated.path is not None
+        assert updated.path.exists()
+
+    def test_tattoo_content_immutable(self):
+        mem = wiki.write_memory("tattoo", "chest", "core", "Original fact")
+        with pytest.raises(ValueError, match="content cannot be changed"):
+            wiki.update_memory(mem.id, content="Changed fact")
+
+    def test_tattoo_context_immutable(self):
+        mem = wiki.write_memory("tattoo", "chest", "core", "Fact")
+        with pytest.raises(ValueError, match="context cannot be changed"):
+            wiki.update_memory(mem.id, context="hand")
+
+    def test_tattoo_topic_immutable(self):
+        mem = wiki.write_memory("tattoo", "chest", "core", "Fact")
+        with pytest.raises(ValueError, match="topic cannot be changed"):
+            wiki.update_memory(mem.id, topic="new-topic")
+
+    def test_tattoo_title_can_update(self):
+        mem = wiki.write_memory("tattoo", "chest", "core", "Fact", title="Old")
+        updated = wiki.update_memory(mem.id, title="New Title")
+        assert updated.title == "New Title"
+
+    def test_tattoo_tags_can_update(self):
+        mem = wiki.write_memory("tattoo", "chest", "core", "Fact", tags=["a"])
+        updated = wiki.update_memory(mem.id, tags=["a", "b"])
+        assert "b" in updated.tags
+
+
+class TestCertainty:
+    def test_certainty_clamped_on_write(self):
+        mem = wiki.write_memory("note", "hand", "todo", "X", certainty=5.0)
+        assert mem.certainty == 1.0
+
+    def test_certainty_clamped_negative(self):
+        mem = wiki.write_memory("note", "hand", "todo", "X", certainty=-1.0)
+        assert mem.certainty == 0.0
+
+    def test_certainty_clamped_on_update(self):
+        mem = wiki.write_memory("note", "hand", "todo", "X")
+        updated = wiki.update_memory(mem.id, certainty=2.5)
+        assert updated.certainty == 1.0
 
 
 class TestHelpers:
