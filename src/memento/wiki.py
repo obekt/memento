@@ -24,11 +24,22 @@ def _slugify(text: str) -> str:
 
 
 def _safe_dir_name(text: str) -> str:
-    """Convert text to a filesystem-safe directory name."""
+    """Convert text to a filesystem-safe directory name.
+
+    Path separators are normalized away segment-by-segment so the result
+    can never be absolute or contain `..` — `Path.home() / "/tmp/evil"`
+    silently resolves to /tmp/evil, so this must be airtight.
+    """
     s = text.lower().strip()
-    s = re.sub(r"[^\w\s/]", "", s)
-    s = re.sub(r"[-\s]+", "-", s)
-    return s
+    segments = []
+    for seg in s.split("/"):
+        seg = re.sub(r"[^\w\s-]", "", seg)
+        seg = re.sub(r"[-\s]+", "-", seg).strip("-")
+        # Drop empty segments (from leading/double slashes) and any
+        # dot-only segments that survived sanitization.
+        if seg and seg.strip(".") and seg not in (".", ".."):
+            segments.append(seg)
+    return "/".join(segments) or "default"
 
 
 @dataclass
@@ -121,7 +132,11 @@ def _write_md(path: Path, memory: Memory) -> None:
     fm_yaml = yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True)
     body = memory.content.strip()
     text = f"---\n{fm_yaml}---\n\n{body}\n"
-    path.write_text(text, encoding="utf-8")
+    # Atomic write: tmp file + rename, so a crash mid-write can never
+    # truncate or corrupt the markdown source of truth.
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
 
 
 def _read_md(path: Path) -> Memory:
@@ -311,20 +326,24 @@ def update_memory(
         mem.source = source
     mem.updated_at = now
 
-    # If context or topic changed, move the file
+    # If context or topic changed, move the file.
+    # Write the new file BEFORE unlinking the old one — the previous
+    # order (unlink, then write) lost the memory entirely if anything
+    # failed between the two steps.
     if context is not None or topic is not None:
         new_path = _memory_path(mem.context, mem.topic, mem.slug)
         if new_path != path:
-            path.unlink()
-            _cleanup_empty_dirs(path.parent)
             # Handle collision at new location
             counter = 1
             original = new_path
             while new_path.exists():
                 new_path = original.with_name(f"{_slugify(mem.slug)}-{counter}.md")
                 counter += 1
+            mem.slug = new_path.stem
             mem.path = new_path
             _write_md(new_path, mem)
+            path.unlink()
+            _cleanup_empty_dirs(path.parent)
             return mem
 
     mem.path = path

@@ -1,6 +1,7 @@
 """Rebuildable SQLite search index for the markdown wiki."""
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -195,9 +196,24 @@ def deindex_memory(memory_id: str) -> None:
 
 
 def rebuild_index() -> dict[str, Any]:
-    """Full rebuild of the index from the wiki directory."""
+    """Full rebuild of the index from the wiki directory.
+
+    Tolerant of bad data: files with a missing or duplicate frontmatter
+    `id:` are skipped (and reported) instead of crashing the server at
+    startup with an IntegrityError.
+    """
     init_index()
     memories = scan_wiki()
+    skipped: list[str] = []
+    seen_ids: set[str] = set()
+    indexed: list[Memory] = []
+    for memory in memories:
+        if not memory.id or memory.id in seen_ids:
+            skipped.append(str(memory.path) if memory.path else memory.slug)
+            continue
+        seen_ids.add(memory.id)
+        indexed.append(memory)
+    memories = indexed
     with _connect() as conn:
         conn.execute("DELETE FROM index_entries")
         conn.execute("DELETE FROM fts_entries")
@@ -228,10 +244,13 @@ def rebuild_index() -> dict[str, Any]:
         for memory in memories:
             _update_links(conn, memory)
         conn.commit()
-    return {
+    result: dict[str, Any] = {
         "indexed_entries": len(memories),
         "links": sum(len(parse_links(m.content)) for m in memories),
     }
+    if skipped:
+        result["skipped_files"] = skipped
+    return result
 
 
 def index_stats() -> dict[str, Any]:
@@ -241,6 +260,35 @@ def index_stats() -> dict[str, Any]:
         links = conn.execute("SELECT COUNT(*) as c FROM index_links").fetchone()["c"]
         tags = conn.execute("SELECT COUNT(*) as c FROM index_tags").fetchone()["c"]
         return {"entries": entries, "links": links, "tags": tags}
+
+
+def _fts_query(query: str) -> str:
+    """Turn free-text user input into a safe FTS5 MATCH expression.
+
+    Each whitespace-separated token becomes its own quoted phrase; phrases
+    are joined by implicit AND. User-supplied double quotes are preserved
+    as explicit phrases ("redis error" docker → "redis error" AND "docker").
+
+    The previous implementation wrapped the ENTIRE query in one phrase,
+    which made multi-keyword search return zero results unless the words
+    were adjacent and in order.
+    """
+    tokens: list[str] = []
+    # re.split with one capture group alternates outside/inside quotes:
+    # pieces[0::2] are outside quotes, pieces[1::2] are inside quotes.
+    pieces = re.split(r'"([^"]*)"', query)
+    for i, piece in enumerate(pieces):
+        piece = piece.strip()
+        if not piece:
+            continue
+        if i % 2 == 1:
+            # Inside quotes — keep as a single phrase
+            tokens.append('"' + piece.replace('"', '""') + '"')
+        else:
+            for word in piece.split():
+                tokens.append('"' + word.replace('"', '""') + '"')
+
+    return " ".join(tokens)
 
 
 def search(
@@ -253,8 +301,10 @@ def search(
 ) -> list[Memory]:
     """Full-text search using FTS5, with optional filters."""
     init_index()
+    safe_query = _fts_query(query)
+    if not safe_query:
+        return []
     with _connect() as conn:
-        safe_query = '"' + query.replace('"', '""') + '"'
         sql = """
             SELECT e.* FROM index_entries e
             JOIN fts_entries fts ON e.rowid = fts.rowid

@@ -116,7 +116,7 @@ class TestUpdate:
         updated = wiki.update_memory(mem.id, topic="new-topic")
         assert not old_path.exists()
         assert updated.path.exists()
-        assert "newtopic" in str(updated.path)
+        assert "new-topic" in str(updated.path)
 
     def test_update_sets_path_even_without_move(self):
         mem = wiki.write_memory("note", "hand", "todo", "Content")
@@ -175,3 +175,66 @@ class TestHelpers:
 
     def test_slugify(self):
         assert wiki._slugify("Hello World!") == "hello-world"
+
+
+class TestPathSafety:
+    """context/topic must never escape the wiki root.
+
+    Path.home() / "/tmp/evil" silently resolves to /tmp/evil, so
+    _safe_dir_name must strip absolute paths and `..` segments.
+    """
+
+    def test_absolute_context_stays_in_wiki(self):
+        mem = wiki.write_memory("note", "/tmp/evil", "topic", "content")
+        assert wiki.WIKI_ROOT in mem.path.parents
+
+    def test_dotdot_context_stays_in_wiki(self):
+        mem = wiki.write_memory("note", "../escape", "topic", "content")
+        assert wiki.WIKI_ROOT in mem.path.parents
+        assert ".." not in mem.path.parts
+
+    def test_dotdot_topic_stays_in_wiki(self):
+        mem = wiki.write_memory("note", "ctx", "../../escape", "content")
+        assert wiki.WIKI_ROOT in mem.path.parents
+        assert ".." not in mem.path.parts
+
+    def test_empty_context_gets_default(self):
+        assert wiki._safe_dir_name("///") == "default"
+        assert wiki._safe_dir_name("..") == "default"
+
+    def test_normal_names_unchanged(self):
+        assert wiki._safe_dir_name("chest") == "chest"
+        assert wiki._safe_dir_name("left arm") == "left-arm"
+        assert wiki._safe_dir_name("a/b/c") == "a/b/c"
+
+
+class TestMoveDoesNotLoseData:
+    def test_move_writes_new_before_deleting_old(self, monkeypatch):
+        """If the write to the new location fails, the old file must survive."""
+        mem = wiki.write_memory("note", "hand", "old-topic", "Precious content")
+        old_path = mem.path
+
+        original_write = wiki._write_md
+
+        def failing_write(path, memory):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(wiki, "_write_md", failing_write)
+        try:
+            wiki.update_memory(mem.id, topic="new-topic")
+        except OSError:
+            pass
+        monkeypatch.setattr(wiki, "_write_md", original_write)
+
+        # The memory must still exist somewhere on disk
+        assert old_path.exists()
+        assert "Precious content" in old_path.read_text(encoding="utf-8")
+
+    def test_move_collision_updates_slug(self):
+        """After a collision rename, frontmatter slug must match the filename."""
+        blocker = wiki.write_memory("note", "hand", "new-topic", "blocker", slug="content")
+        mem = wiki.write_memory("note", "hand", "old-topic", "mover", slug="content")
+        updated = wiki.update_memory(mem.id, topic="new-topic")
+        assert updated.path.stem == updated.slug
+        reread = wiki.read_memory(updated.path)
+        assert reread.slug == updated.path.stem

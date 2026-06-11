@@ -1,13 +1,40 @@
 """Export, import, and merge for the markdown wiki."""
 
 import json
+import re
 import shutil
+import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from memento import wiki
+
+
+def _reassign_id(md_text: str) -> str:
+    """Give a markdown memory a fresh frontmatter `id:`.
+
+    Used when `keep_both` duplicates a file: the variant must NOT share
+    the original's UUID, or the index (id is PRIMARY KEY) breaks.
+    """
+    new_id = str(uuid.uuid4())
+    if md_text.startswith("---"):
+        head, sep, tail = md_text[3:].partition("---")
+        if sep:
+            if re.search(r"(?m)^id:.*$", head):
+                head = re.sub(r"(?m)^id:.*$", f"id: {new_id}", head, count=1)
+            else:
+                head = f"id: {new_id}\n" + head.lstrip("\n")
+            return "---" + head + sep + tail
+    # No parseable frontmatter — prepend a minimal one
+    return f"---\nid: {new_id}\n---\n\n{md_text}"
+
+
+def _is_safe_member(name: str) -> bool:
+    """Reject zip member names that would escape the wiki root (zip-slip)."""
+    p = Path(name)
+    return not p.is_absolute() and ".." not in p.parts
 
 
 def export_vault(path: str | None = None) -> str:
@@ -62,6 +89,9 @@ def import_vault(path: str, merge_strategy: str = "keep_both") -> dict[str, Any]
     with zipfile.ZipFile(target, "r") as zf:
         for item in zf.namelist():
             if item.endswith("/") or not item.endswith(".md"):
+                continue
+            if not _is_safe_member(item):
+                skipped += 1
                 continue
             data = zf.read(item)
             dest = wiki.WIKI_ROOT / item
@@ -119,7 +149,9 @@ def import_vault(path: str, merge_strategy: str = "keep_both") -> dict[str, Any]
             while variant.exists():
                 variant = orig.with_name(dest.stem + f".imported-{counter}" + dest.suffix)
                 counter += 1
-            variant.write_bytes(data)
+            # The variant coexists with the original, so it needs its own
+            # identity — duplicate frontmatter ids crash the index rebuild.
+            variant.write_text(_reassign_id(imported_text), encoding="utf-8")
             conflicts += 1
 
     return {
@@ -140,7 +172,8 @@ def merge_vaults(path_a: str, path_b: str, output_path: str, merge_strategy: str
 
     def extract_to(zip_path: str, dest_dir: Path) -> None:
         with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(dest_dir)
+            members = [m for m in zf.namelist() if _is_safe_member(m)]
+            zf.extractall(dest_dir, members=members)
 
     dir_a = out_dir / "._merge_a"
     dir_b = out_dir / "._merge_b"
@@ -211,7 +244,9 @@ def merge_vaults(path_a: str, path_b: str, output_path: str, merge_strategy: str
         while variant.exists():
             variant = orig.with_name(dst.stem + f".merged-variant-{counter}" + dst.suffix)
             counter += 1
-        shutil.copy2(src, variant)
+        variant.write_text(
+            _reassign_id(src.read_text(encoding="utf-8")), encoding="utf-8"
+        )
         conflicts += 1
 
     # Package into zip

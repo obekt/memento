@@ -90,3 +90,74 @@ class TestStats:
         index.rebuild_index()
         stats = index.index_stats()
         assert stats["entries"] == 1
+
+
+class TestMultiKeywordSearch:
+    """Multi-keyword queries must match non-adjacent, out-of-order words.
+
+    Regression: queries used to be wrapped in ONE phrase, so
+    'redis refused' returned 0 hits against 'Redis connection refused'.
+    """
+
+    def test_keywords_match_non_adjacent_words(self):
+        mem = wiki.write_memory(
+            "polaroid", "left_arm", "errors", "Redis connection refused on port 6379"
+        )
+        index.index_memory(mem, mem.path)
+        assert len(index.search("redis refused")) == 1
+
+    def test_keywords_match_out_of_order(self):
+        mem = wiki.write_memory(
+            "polaroid", "left_arm", "errors", "Redis connection refused on port 6379"
+        )
+        index.index_memory(mem, mem.path)
+        assert len(index.search("refused redis")) == 1
+
+    def test_keywords_are_anded(self):
+        mem = wiki.write_memory("note", "hand", "todo", "Redis cache layer")
+        index.index_memory(mem, mem.path)
+        assert len(index.search("redis nonexistentword")) == 0
+
+    def test_explicit_phrase_preserved(self):
+        a = wiki.write_memory("note", "hand", "todo", "connection refused error")
+        b = wiki.write_memory("note", "hand", "todo", "refused the connection politely")
+        index.index_memory(a, a.path)
+        index.index_memory(b, b.path)
+        results = index.search('"connection refused"')
+        assert len(results) == 1
+        assert results[0].id == a.id
+
+    def test_empty_query_returns_empty(self):
+        assert index.search("") == []
+        assert index.search("   ") == []
+
+    def test_injection_chars_are_safe(self):
+        mem = wiki.write_memory("note", "hand", "todo", "some content")
+        index.index_memory(mem, mem.path)
+        # None of these should raise a MATCH syntax error
+        index.search("col:value")
+        index.search("a AND b OR c NOT d")
+        index.search("weird-chars *star (paren)")
+        index.search('"unbalanced quote')
+
+
+class TestRebuildResilience:
+    def test_rebuild_skips_duplicate_ids(self):
+        """Duplicate frontmatter ids must not crash the rebuild (server boot)."""
+        mem = wiki.write_memory("tattoo", "chest", "core", "Original fact")
+        dup = mem.path.with_name(mem.path.stem + ".imported.md")
+        dup.write_text(mem.path.read_text(encoding="utf-8"), encoding="utf-8")
+
+        stats = index.rebuild_index()  # must not raise IntegrityError
+        assert stats["indexed_entries"] == 1
+        assert len(stats.get("skipped_files", [])) == 1
+
+    def test_rebuild_skips_missing_id(self):
+        wiki.ensure_wiki()
+        bad = wiki.WIKI_ROOT / "chest" / "core"
+        bad.mkdir(parents=True, exist_ok=True)
+        (bad / "no-id.md").write_text(
+            "---\nkind: note\n---\n\nbody without id\n", encoding="utf-8"
+        )
+        stats = index.rebuild_index()  # must not raise
+        assert stats["indexed_entries"] == 0
