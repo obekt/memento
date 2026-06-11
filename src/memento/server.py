@@ -161,6 +161,7 @@ async def read_resource(uri: str) -> str:
     if uri == "memento://guide":
         return MEMENTO_GUIDE
     if uri == "memento://contexts":
+        index.sync_if_stale()
         contexts = memory.list_contexts()
         return json.dumps(contexts, indent=2)
     if uri.startswith("memento://context/"):
@@ -491,6 +492,10 @@ async def list_tools() -> list[Tool]:
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     if name == "get_memento_guide":
         return [TextContent(type="text", text=MEMENTO_GUIDE)]
+
+    # Pick up files edited outside Memento (vim, git pull, rsync) — the
+    # markdown files are the source of truth, so resync before serving.
+    index.sync_if_stale()
 
     if name == "tattoo":
         mem = memory.store(

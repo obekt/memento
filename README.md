@@ -298,6 +298,8 @@ Your agent sees these tools (MCP clients may prefix them, e.g. `memento_tattoo`)
 - **Millions of rows** possible
 - **Zip export** — just markdown files, no giant JSON blobs
 - **Crash-safe writes** — memory files are written atomically (tmp + rename); moves write the new file before deleting the old
+- **Concurrent-call safe** — SQLite runs in WAL mode with busy timeout; index mutations are transactional
+- **External edits picked up live** — edit memory files with your editor; the index resyncs automatically on the next tool call (no restart needed)
 - **Safe imports** — zip-slip members are rejected, `keep_both` conflict copies get fresh IDs, and a corrupt/duplicate file can't brick server startup (it's skipped and reported)
 
 ---
@@ -331,10 +333,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/ARCHITECTURE.md](docs/ARCHITECT
 
 See [TODO.md](TODO.md) for the full list with file/line references. Highlights:
 
-- No SQLite WAL/locking — concurrent MCP tool calls can hit `database is locked`
-- Renaming/deleting a memory leaves other files' `[[wiki-links]]` and index backlinks stale
-- Editing files directly with `vim` requires a server restart to reindex (no mtime-based sync)
 - `merge_vaults` cleanup deletes sibling directories if `output_path` is inside a non-empty folder
+- `keep_newer` import strategy silently skips files when timestamps mix naive/aware datetimes
+- `[[wiki-link]]` resolution ignores context namespaces (ambiguous slugs resolve arbitrarily)
 
 ---
 

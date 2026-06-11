@@ -3,6 +3,7 @@
 import json
 import re
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -13,9 +14,34 @@ INDEX_PATH = Path.home() / ".memento" / ".index.db"
 
 def _connect() -> sqlite3.Connection:
     INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(INDEX_PATH))
+    # autocommit mode (isolation_level=None): we control transactions
+    # explicitly via _write_txn for multi-statement mutations.
+    conn = sqlite3.connect(str(INDEX_PATH), timeout=10.0, isolation_level=None)
     conn.row_factory = sqlite3.Row
+    # MCP servers can receive concurrent tool calls; WAL allows readers
+    # alongside a writer, busy_timeout makes writers wait instead of
+    # failing with 'database is locked'.
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=10000")
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
+
+
+@contextmanager
+def _write_txn(conn: sqlite3.Connection):
+    """Run a multi-statement mutation atomically.
+
+    BEGIN IMMEDIATE takes the write lock up front so read-modify-write
+    sequences (e.g. FTS delete by old rowid, then re-insert) can't
+    interleave with another writer and desync the FTS index.
+    """
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
 
 
 def init_index() -> None:
@@ -75,6 +101,15 @@ def init_index() -> None:
                 source_id TEXT NOT NULL,
                 target_id TEXT,
                 link_text TEXT
+            )
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS index_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             )
             """
         )
@@ -140,7 +175,7 @@ def _update_links(conn: sqlite3.Connection, memory: Memory) -> None:
 def index_memory(memory: Memory, path: Path) -> None:
     """Add or update a single memory in the index."""
     init_index()
-    with _connect() as conn:
+    with _connect() as conn, _write_txn(conn):
         # Get old rowid + content for FTS delete if updating
         old = conn.execute(
             "SELECT rowid, title, content, caption FROM index_entries WHERE id = ?",
@@ -176,13 +211,30 @@ def index_memory(memory: Memory, path: Path) -> None:
         )
         _set_tags(conn, memory.id, memory.tags)
         _update_links(conn, memory)
-        conn.commit()
+        # Retro-resolve dangling links that point at this (possibly new)
+        # memory by slug, topic/slug, or title — forward references and
+        # renames would otherwise stay unresolved until a full rebuild.
+        conn.execute(
+            """
+            UPDATE index_links SET target_id = ?
+            WHERE target_id IS NULL
+              AND (link_text = ? OR link_text = ? OR (? != '' AND link_text = ?))
+            """,
+            (
+                memory.id,
+                memory.slug,
+                f"{memory.topic}/{memory.slug}",
+                memory.title,
+                memory.title,
+            ),
+        )
+        _store_signature(conn)
 
 
 def deindex_memory(memory_id: str) -> None:
     """Remove a memory from the index."""
     init_index()
-    with _connect() as conn:
+    with _connect() as conn, _write_txn(conn):
         old = conn.execute("SELECT rowid, title, content, caption FROM index_entries WHERE id = ?", (memory_id,)).fetchone()
         if old:
             conn.execute(
@@ -192,7 +244,14 @@ def deindex_memory(memory_id: str) -> None:
         conn.execute("DELETE FROM index_entries WHERE id = ?", (memory_id,))
         conn.execute("DELETE FROM index_links WHERE source_id = ?", (memory_id,))
         conn.execute("DELETE FROM index_entry_tags WHERE entry_id = ?", (memory_id,))
-        conn.commit()
+        # Inbound links now dangle: mark them unresolved instead of
+        # leaving target_id pointing at a dead memory (get_backlinks of
+        # the deleted id would otherwise still return "live" results).
+        conn.execute(
+            "UPDATE index_links SET target_id = NULL WHERE target_id = ?",
+            (memory_id,),
+        )
+        _store_signature(conn)
 
 
 def rebuild_index() -> dict[str, Any]:
@@ -214,9 +273,12 @@ def rebuild_index() -> dict[str, Any]:
         seen_ids.add(memory.id)
         indexed.append(memory)
     memories = indexed
-    with _connect() as conn:
+    with _connect() as conn, _write_txn(conn):
         conn.execute("DELETE FROM index_entries")
-        conn.execute("DELETE FROM fts_entries")
+        # External-content FTS5 tables must be cleared with the special
+        # 'delete-all' command — a plain DELETE leaves stale tokens in the
+        # inverted index that then match against reused rowids.
+        conn.execute("INSERT INTO fts_entries(fts_entries) VALUES ('delete-all')")
         conn.execute("DELETE FROM index_links")
         conn.execute("DELETE FROM index_entry_tags")
         conn.execute("DELETE FROM index_tags")
@@ -243,7 +305,7 @@ def rebuild_index() -> dict[str, Any]:
         # Now resolve links (second pass so all entries exist)
         for memory in memories:
             _update_links(conn, memory)
-        conn.commit()
+        _store_signature(conn)
     result: dict[str, Any] = {
         "indexed_entries": len(memories),
         "links": sum(len(parse_links(m.content)) for m in memories),
@@ -251,6 +313,54 @@ def rebuild_index() -> dict[str, Any]:
     if skipped:
         result["skipped_files"] = skipped
     return result
+
+
+def _wiki_signature() -> str:
+    """Cheap fingerprint of the wiki's on-disk state: file count + newest mtime.
+
+    Used to detect external edits (vim, git pull, rsync) so the index can
+    resync without a server restart. Note: mtime granularity is filesystem
+    dependent (~1s worst case), so a same-second in-place edit with an
+    unchanged file count may be missed — acceptable for the vim use case.
+    """
+    latest = 0.0
+    count = 0
+    if WIKI_ROOT.exists():
+        for p in WIKI_ROOT.rglob("*.md"):
+            count += 1
+            try:
+                m = p.stat().st_mtime
+            except OSError:
+                continue
+            if m > latest:
+                latest = m
+    return f"{count}:{latest}"
+
+
+def _store_signature(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO index_meta (key, value) VALUES ('wiki_signature', ?)",
+        (_wiki_signature(),),
+    )
+
+
+def sync_if_stale() -> bool:
+    """Rebuild the index if wiki files changed outside Memento.
+
+    The README advertises editing memory files directly with vim; without
+    this, such edits were invisible until a full server restart. Called
+    before serving tool requests. Returns True if a rebuild happened.
+    """
+    init_index()
+    sig = _wiki_signature()
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT value FROM index_meta WHERE key = 'wiki_signature'"
+        ).fetchone()
+    if row and row["value"] == sig:
+        return False
+    rebuild_index()
+    return True
 
 
 def index_stats() -> dict[str, Any]:

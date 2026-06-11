@@ -57,7 +57,13 @@ def update(
     source: str | None = None,
     tags: list[str] | None = None,
 ) -> wiki.Memory | None:
-    """Update an existing memory: rewrite .md file, re-index."""
+    """Update an existing memory: rewrite .md file, re-index.
+
+    If the update changes the memory's slug or topic (a rename/move),
+    inbound [[wiki-links]] in other memories are rewritten to the new
+    target and those sources re-indexed, so backlinks never go stale.
+    """
+    old = recall(memory_id)
     memory = wiki.update_memory(
         memory_id=memory_id,
         context=context,
@@ -73,7 +79,40 @@ def update(
     if memory is None:
         return None
     index.index_memory(memory, memory.path)
+    if old is not None and (old.slug != memory.slug or old.topic != memory.topic):
+        _rewrite_inbound_links(old, memory)
     return memory
+
+
+def _rewrite_inbound_links(old: wiki.Memory, new: wiki.Memory) -> None:
+    """Rewrite [[old-slug]] links in memories that point at a renamed memory.
+
+    Without this, renaming a memory leaves other files' links pointing at
+    a slug that no longer exists — they'd silently stop resolving the next
+    time their source files were re-indexed.
+    """
+    replacements = {
+        f"[[{old.slug}]]": f"[[{new.slug}]]",
+        f"[[{old.topic}/{old.slug}]]": f"[[{new.topic}/{new.slug}]]",
+    }
+    for backlink in index.get_backlinks(new.id):
+        source_id = backlink.get("memory_id")
+        if not source_id or source_id == new.id:
+            continue
+        path = wiki.find_memory(source_id)
+        if path is None:
+            continue
+        try:
+            source = wiki.read_memory(path)
+        except Exception:
+            continue
+        updated_content = source.content
+        for old_link, new_link in replacements.items():
+            updated_content = updated_content.replace(old_link, new_link)
+        if updated_content != source.content:
+            source.content = updated_content
+            wiki._write_md(path, source)
+            index.index_memory(source, path)
 
 
 def burn(memory_id: str) -> bool:

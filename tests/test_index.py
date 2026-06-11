@@ -161,3 +161,113 @@ class TestRebuildResilience:
         )
         stats = index.rebuild_index()  # must not raise
         assert stats["indexed_entries"] == 0
+
+
+class TestConcurrency:
+    def test_concurrent_index_writes(self):
+        """Concurrent index mutations must not raise 'database is locked'
+        or desync the FTS index (WAL + busy_timeout + BEGIN IMMEDIATE)."""
+        import threading
+
+        mems = [
+            wiki.write_memory("note", "hand", "todo", f"unique{i} concurrent body")
+            for i in range(8)
+        ]
+        errors: list[Exception] = []
+
+        def work(m):
+            try:
+                for _ in range(5):
+                    index.index_memory(m, m.path)
+            except Exception as e:  # pragma: no cover
+                errors.append(e)
+
+        threads = [threading.Thread(target=work, args=(m,)) for m in mems]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == []
+        # FTS must be in sync: every memory findable, exactly once
+        for i in range(8):
+            assert len(index.search(f"unique{i}")) == 1
+
+    def test_wal_mode_enabled(self):
+        index.init_index()
+        conn = index._connect()
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        conn.close()
+        assert mode.lower() == "wal"
+
+
+class TestLinkLifecycle:
+    def test_delete_invalidates_inbound_backlinks(self):
+        """Deleting a memory must not leave inbound links 'resolved' to a dead id."""
+        from memento import memory as memory_mod
+
+        target = memory_mod.store("note", "chest", "core", "Core API doc")
+        source = memory_mod.store("note", "hand", "todo", f"See [[{target.slug}]]")
+
+        memory_mod.burn(target.id)
+
+        assert index.get_backlinks(target.id) == []
+        links = index.get_linked_entries(source.id)
+        assert len(links) == 1
+        assert links[0]["resolved"] is False
+
+    def test_forward_reference_resolves_when_target_created(self):
+        """A [[link]] to a memory created LATER must resolve without a rebuild."""
+        from memento import memory as memory_mod
+
+        source = memory_mod.store("note", "hand", "todo", "See [[future-doc]]")
+        links = index.get_linked_entries(source.id)
+        assert links[0]["resolved"] is False
+
+        target = memory_mod.store(
+            "note", "chest", "core", "the future doc", slug="future-doc"
+        )
+        links = index.get_linked_entries(source.id)
+        assert links[0]["resolved"] is True
+        assert links[0]["memory_id"] == target.id
+
+
+class TestExternalEditSync:
+    def test_sync_if_stale_picks_up_vim_edit(self):
+        """Editing a file outside Memento must be searchable after sync_if_stale."""
+        import os
+        from memento import memory as memory_mod
+
+        mem = memory_mod.store("note", "hand", "todo", "original searchable body")
+        index.sync_if_stale()  # settle the signature
+
+        # Simulate a vim edit: change content directly on disk
+        text = mem.path.read_text(encoding="utf-8").replace(
+            "original searchable body", "externally edited zanzibar"
+        )
+        mem.path.write_text(text, encoding="utf-8")
+        # Bump mtime well past filesystem granularity
+        st = mem.path.stat()
+        os.utime(mem.path, (st.st_atime, st.st_mtime + 10))
+
+        assert index.sync_if_stale() is True
+        assert len(index.search("zanzibar")) == 1
+        assert len(index.search("original searchable")) == 0
+
+    def test_sync_if_stale_noop_when_unchanged(self):
+        from memento import memory as memory_mod
+
+        memory_mod.store("note", "hand", "todo", "stable content")
+        index.sync_if_stale()
+        assert index.sync_if_stale() is False
+
+    def test_sync_if_stale_picks_up_new_file(self):
+        index.sync_if_stale()
+        d = wiki.WIKI_ROOT / "chest" / "core"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "manual.md").write_text(
+            "---\nid: manual-id-1\nkind: note\ncontext: chest\ntopic: core\n---\n\nmanually created xylophone\n",
+            encoding="utf-8",
+        )
+        assert index.sync_if_stale() is True
+        assert len(index.search("xylophone")) == 1

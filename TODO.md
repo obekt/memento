@@ -18,34 +18,29 @@ Findings from an architectural review (2026-06-11). Already **fixed** in that pa
   new one; now writes first, deletes after, and keeps `mem.slug` in sync with
   collision-renamed filenames. `_write_md` is atomic (tmp + rename).
 
+Fixed in a second pass (all High items):
+
+- **SQLite concurrency safety** — `index.py::_connect` now enables WAL,
+  `busy_timeout=10s`, and all multi-statement mutations (`index_memory`,
+  `deindex_memory`, `rebuild_index`) run inside `BEGIN IMMEDIATE`
+  transactions (`index.py::_write_txn`). Verified with a concurrent-writes
+  test.
+- **Stale links on rename/delete** — `deindex_memory` now nulls inbound
+  `index_links.target_id` (backlinks of a deleted memory disappear instead
+  of resolving to a dead ID); `memory.update` rewrites `[[old-slug]]` link
+  text in source files and re-indexes them when a rename/move changes
+  slug/topic (`memory.py::_rewrite_inbound_links`); `index_memory`
+  retro-resolves dangling links, so forward references resolve as soon as
+  the target is created.
+- **External edit sync** — `index.py::sync_if_stale()` fingerprints the wiki
+  (file count + newest mtime, stored in new `index_meta` table) and rebuilds
+  the index when files were edited outside Memento (vim, git pull). Called
+  at the top of every `call_tool` dispatch and the `memento://contexts`
+  resource. Fixing this also surfaced that `rebuild_index`'s
+  `DELETE FROM fts_entries` left stale tokens in the external-content FTS
+  index — now uses the canonical `'delete-all'` command.
+
 Everything below is still open, ordered by severity.
-
-## High
-
-- [ ] **No SQLite concurrency safety.** `index.py::_connect` opens a fresh
-  connection per call with no WAL, no `busy_timeout`, no `BEGIN IMMEDIATE`.
-  MCP servers can receive concurrent tool calls; `index_memory` is a
-  multi-statement read-modify-write (FTS delete by old rowid, then re-insert)
-  that can interleave → `database is locked` errors or FTS desync. Fix:
-  `PRAGMA journal_mode=WAL`, `busy_timeout`, and wrap mutations in
-  `BEGIN IMMEDIATE`.
-
-- [ ] **Rename/delete leaves wiki-links and backlinks stale.**
-  - Renaming via `update_memory` doesn't rewrite other files' `[[old-slug]]`
-    links, and their `index_links` rows are only recomputed when *those*
-    sources are re-indexed.
-  - Deleting a memory (`wiki.py::delete_memory` via `memory.py`) leaves all
-    inbound `index_links.target_id` rows pointing at a dead ID.
-  Fix: on rename/delete, update or invalidate inbound `index_links` rows
-  (query `get_backlinks` first), and optionally rewrite link text in source
-  files on rename.
-
-- [ ] **No incremental file↔index sync.** README advertises editing memory
-  files with `vim`, but nothing reindexes until full restart; `wiki.update_memory`
-  / `wiki.delete_memory` are public and bypass the index entirely (only the
-  `memory.py` wrappers sync). Fix: mtime-based incremental sync on each tool
-  call (cheap: compare max mtime vs a stored watermark), or at least re-export
-  only the `memory.py` wrappers.
 
 ## Medium
 
@@ -65,11 +60,6 @@ Everything below is still open, ordered by severity.
   ambiguous slugs across contexts resolve to an arbitrary entry, defeating the
   "body parts avoid collision" premise. Fix: prefer same-context matches, then
   global; surface ambiguity.
-
-- [ ] **Forward references never resolve.** Links to memories created *later*
-  keep `target_id = NULL` until a full rebuild. Fix: on `index_memory`, also
-  re-resolve `index_links` rows whose `link_text` matches the new entry's
-  slug/title.
 
 - [ ] **`read_resource` URI handling.** `server.py` compares the MCP `AnyUrl`
   against `str` (`uri == "memento://guide"`), and the `memento://context/...`
@@ -96,8 +86,5 @@ Everything below is still open, ordered by severity.
   effectively dead code.
 - [ ] **Fallback context/topic derivation in `_read_md`** breaks for files
   directly under a context dir or at wiki root.
-- [ ] **`rebuild_index` uses `DELETE FROM fts_entries`** on an external-content
-  FTS5 table; the canonical idiom is the `'delete-all'` command.
-- [ ] **Test gaps:** no concurrency tests, no malformed-frontmatter tests, no
-  rename-backlink tests; `test_server.py` calls handlers with `str` URIs
-  instead of `AnyUrl`.
+- [ ] **Test gaps:** no malformed-frontmatter tests; `test_server.py` calls
+  handlers with `str` URIs instead of `AnyUrl`.

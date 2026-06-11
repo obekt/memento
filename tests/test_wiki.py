@@ -230,6 +230,56 @@ class TestMoveDoesNotLoseData:
         assert old_path.exists()
         assert "Precious content" in old_path.read_text(encoding="utf-8")
 
+    def test_rename_rewrites_inbound_links(self):
+        """Renaming (moving) a memory must rewrite other files' [[links]]
+        and keep backlinks resolving."""
+        from memento import memory as memory_mod, index, search
+
+        target = memory_mod.store("note", "chest", "core", "API contract doc")
+        source = memory_mod.store(
+            "note", "hand", "todo", f"Check [[{target.slug}]] before deploy"
+        )
+
+        moved = memory_mod.update(target.id, topic="archived")
+        # Slug may stay the same on a topic-only move; force the full case
+        assert moved is not None
+
+        # Backlink must still resolve to the moved memory
+        backlinks = search.get_backlinks(target.id)
+        assert len(backlinks) == 1
+        assert backlinks[0]["memory_id"] == source.id
+
+        links = index.get_linked_entries(source.id)
+        assert len(links) == 1
+        assert links[0]["resolved"] is True
+        assert links[0]["memory_id"] == target.id
+
+    def test_rename_with_slug_change_rewrites_link_text(self):
+        """When a move forces a slug rename (collision), the source file's
+        [[old-slug]] text must be rewritten to the new slug."""
+        from memento import memory as memory_mod
+
+        # Occupy the destination slug to force a collision rename
+        memory_mod.store("note", "hand", "new-topic", "blocker", slug="shared")
+        target = memory_mod.store("note", "hand", "old-topic", "mover", slug="shared")
+        source = memory_mod.store("note", "chest", "core", "See [[shared]] for info")
+
+        # Linking by slug 'shared' is ambiguous (blocker vs target) — make
+        # sure the source resolved to target before the move for this test
+        from memento import index
+        with index._connect() as conn:
+            conn.execute(
+                "UPDATE index_links SET target_id = ? WHERE source_id = ?",
+                (target.id, source.id),
+            )
+
+        moved = memory_mod.update(target.id, topic="new-topic")
+        assert moved.slug == "shared-1"
+
+        refreshed = memory_mod.recall(source.id)
+        assert "[[shared-1]]" in refreshed.content
+        assert "[[shared]]" not in refreshed.content
+
     def test_move_collision_updates_slug(self):
         """After a collision rename, frontmatter slug must match the filename."""
         blocker = wiki.write_memory("note", "hand", "new-topic", "blocker", slug="content")
